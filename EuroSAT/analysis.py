@@ -1,12 +1,14 @@
-import torch
+import torch, torchvision
 import numpy as np
+import tifffile
+from torch.profiler import profile, record_function, ProfilerActivity
 
 quantBound_dict = {}
 model_series_dict = {}
 Lipchitz_dict = {}
 innout_dict = {}
 
-def Tol_on_raw_data(userRelativeBound, Qratio, exp='RR'):
+def Tol_on_raw_data(userRelativeBound, Qratio, exp='H2C'):
     quantBound = quantBound_dict[exp]
     model_series = model_series_dict[exp]
     Lipchitz = Lipchitz_dict[exp]
@@ -41,7 +43,7 @@ def test(compBoundLinfMDR, quantizedModels, compressor='zfp'):
     return achievedRelativeLinf
 
 userRelativeBound = np.logspace(-0.5, -4.5, 17) #specify a tolerance range of your interests
-quantizedModels, compBoundLinf, compBoundLinfMDR, compBoundL2, compBoundMSE, compBoundMSEMDR = Tol_on_raw_data(userRelativeBound, 0.1, 'RR')
+quantizedModels, compBoundLinf, compBoundLinfMDR, compBoundL2, compBoundMSE, compBoundMSEMDR = Tol_on_raw_data(userRelativeBound, 0.1, 'H2C')
 
 for ref in ['zfp_re', 'sz_re', 'mgard_re', 'sz_re_r2', 'mgard_re_r2']:
     achievedRelativeLinf = []
@@ -63,3 +65,55 @@ for ref in ['zfp_re', 'sz_re', 'mgard_re', 'sz_re_r2', 'mgard_re_r2']:
     
         achievedRelativeLinf.append((np.linalg.norm(outputs_lossy.flatten() - outputs.flatten(), ord=np.inf)/np.linalg.norm(outputs.flatten(), ord=np.inf)).item())
         achievedRelativeL2.append((np.linalg.norm(outputs_lossy.flatten() - outputs.flatten())/np.linalg.norm(outputs.flatten())).item())
+
+# Data augmentation and normalization for training
+# Just normalization for validation
+
+data_transforms = torchvision.transforms.Compose([
+    torchvision.transforms.Resize(224),
+    torchvision.transforms.Normalize([0.0144, 0.0159, 0.0170], [0.0052, 0.0036, 0.0031]),
+])
+def tiff_loader(path):
+    image = tifffile.imread(path)
+    # EuroSAT bands are 1-indexed, PyTorch tensors are 0-indexed
+    # Band 4 (Red), Band 3 (Green), Band 2 (Blue)
+    image = image[:, :, (3, 2, 1)].astype(np.float32)
+    image = torch.from_numpy(image/65535).permute(2,0,1)
+    return image
+
+data_dir = 'path_to_EuroSAT_dataset'
+image_dataset = torchvision.datasets.ImageFolder(data_dir, data_transforms, loader=tiff_loader)
+
+image_dataset, _ = torch.utils.data.random_split(image_dataset, [1024, 25976], generator=torch.Generator().manual_seed(42))
+
+data_loader = torch.utils.data.DataLoader(image_dataset, batch_size=1024)
+
+
+torch.cuda.empty_cache()
+torch.cuda.reset_peak_memory_stats()
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+module = torchvision.models.resnet18
+model = module(weights='DEFAULT').to(device)
+model.eval()
+
+with torch.no_grad():
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], profile_memory=True, with_stack=True) as prof:
+        with record_function("{inference}"):
+            for inputs, _ in data_loader:
+                with record_function("{tensor_converting}"):
+                    inputs = inputs.to(device)
+    
+                with record_function("{model_execution}"):
+                    outputs = model(inputs)
+
+del inputs, outputs, model
+
+print(prof.key_averages().table(sort_by="cpu_memory_usage", row_limit=1))
+print(prof.key_averages().table(sort_by="cuda_memory_usage", row_limit=1))
+print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=3))
+prof.export_chrome_trace("trace_{}.json".format(module.__name__))
+
+stats = torch.cuda.memory_stats()
+print('CUDA Mem {:.1f}%'.format(stats["allocated_bytes.all.peak"]/1024**2/13615*100))
