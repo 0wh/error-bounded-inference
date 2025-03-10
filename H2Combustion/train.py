@@ -4,6 +4,7 @@ from torch.nn.utils.parametrizations import spectral_norm
 from torch.nn.parameter import Parameter
 from torch.nn.init import _calculate_fan_in_and_fan_out, uniform_
 import math
+import argparse
 
 from torch.utils.data import TensorDataset, DataLoader
 
@@ -38,47 +39,54 @@ class Model_H2C(torch.nn.Module):
         x = self._scale*self.layer3(x)+self._bias
         return x
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True, help="Path to the input tensor file")
+    parser.add_argument("--target", required=True, help="Path to the target tensor file")
+    parser.add_argument("--checkpoint", required=True, help="Path to the model checkpoint")
+    args = parser.parse_args()
 
-model = Model_H2C().to(device)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# Create a TensorDataset and DataLoader
-input_torch_tensor = torch.load('path_to_input_tensor_file')
-target_torch_tensor = torch.load('path_to_target_tensor_file')
-dataset = TensorDataset(input_torch_tensor, target_torch_tensor)
-data_loader = DataLoader(dataset, batch_size=64, shuffle=True)
+    model = Model_H2C().to(device)
 
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-criterion = nn.MSELoss()  # Mean Squared Error Loss
-# Number of epochs to train the model
-num_epochs = 10
-for epoch in range(num_epochs):
-    model.train()  # Set the model to training mode
-    running_loss = 0.0
-    
-    for inputs, targets in data_loader:
-        # Move data to the appropriate device
-        inputs, targets = inputs.to(device), targets.to(device)
+    # Create a TensorDataset and DataLoader
+    input_torch_tensor = torch.load(args.input)
+    target_torch_tensor = torch.load(args.target)
+    dataset = TensorDataset(input_torch_tensor, target_torch_tensor)
+    data_loader = DataLoader(dataset, batch_size=64, shuffle=True)
 
-        # Zero the parameter gradients
-        optimizer.zero_grad()
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    criterion = nn.MSELoss()  # Mean Squared Error Loss
+    # Number of epochs to train the model
+    num_epochs = 10
+    for epoch in range(num_epochs):
+        model.train()  # Set the model to training mode
+        running_loss = 0.0
+        
+        for inputs, targets in data_loader:
+            # Move data to the appropriate device
+            inputs, targets = inputs.to(device), targets.to(device)
 
-        # Forward pass
-        outputs = model(inputs)
-        loss = criterion(outputs, targets)
+            # Zero the parameter gradients
+            optimizer.zero_grad()
 
-        # Backward pass and optimize
-        loss.backward()
-        optimizer.step()
+            # Forward pass
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
 
-        # Print statistics
-        running_loss += loss.item() * inputs.size(0)
+            # Backward pass and optimize
+            loss.backward()
+            optimizer.step()
 
-    # Average loss for this epoch
-    epoch_loss = running_loss / len(data_loader.dataset)
-    model.eval()
-    with torch.no_grad():
-        epoch_error = torch.linalg.norm(model(input_torch_tensor.to(device, torch.float32))-target_torch_tensor)/torch.sqrt(target_torch_tensor.shape[0])
-    print(f'Epoch {epoch + 1}, Loss: {epoch_loss:1.3e}, Error: {epoch_error:1.3e}')
+            # Print statistics
+            running_loss += loss.item() * inputs.size(0)
 
-torch.save(model.state_dict(), 'path_to_model_checkpoint')
+        # Average loss for this epoch
+        epoch_loss = running_loss / len(data_loader.dataset)
+        model.eval()
+        with torch.no_grad():
+            epoch_error = torch.linalg.norm(model(input_torch_tensor.to(device, torch.float32))-target_torch_tensor)/torch.sqrt(target_torch_tensor.shape[0])
+        print(f'Epoch {epoch + 1}, Loss: {epoch_loss:1.3e}, Error: {epoch_error:1.3e}')
+
+    torch.save(model.state_dict(), args.checkpoint)
